@@ -87,6 +87,70 @@ def run_reconciliation(source_path, master_path, po_master_path, export_folder):
     df_duplicates = df_duplicates_final.sort_values(by='ACCOUNT NO.')
 
     # =========================================================
+    # NEW LOGIC: PO Reconciliation (Using df_duplicates & PO Master)
+    # =========================================================
+    # Initialize empty DataFrames for the new outputs
+    df_po_success = pd.DataFrame()
+    df_po_errors = pd.DataFrame()
+
+    if po_master_path and os.path.exists(po_master_path) and not df_duplicates.empty:
+        try:
+            # 1. Load PO Master File
+            df_po_master = pd.read_excel(po_master_path)
+            
+            # 2. Standardize Columns (Map variations to expected names)
+            # Expected: ACCOUNT NO., Part No., PO Number, Quantity
+            po_col_map = {
+                'Account': 'ACCOUNT NO.', 'Account No': 'ACCOUNT NO.', 'Account No.': 'ACCOUNT NO.',
+                'Part No': 'Part No.', 'Part No.': 'Part No.', 'Part #': 'Part No.',
+                'PO': 'PO Number', 'PO #': 'PO Number', 'PO Number': 'PO Number',
+                'Qty': 'Quantity', 'QTY': 'Quantity', 'Quantity': 'Quantity'
+            }
+            df_po_master.rename(columns=po_col_map, inplace=True)
+
+            # 3. Clean Data
+            # Ensure Account and Part No are strings and formatted like the source
+            if 'ACCOUNT NO.' in df_po_master.columns and 'Part No.' in df_po_master.columns:
+                df_po_master['ACCOUNT NO.'] = df_po_master['ACCOUNT NO.'].fillna('').astype(str).str.strip().str.lstrip('0')
+                df_po_master['Part No.'] = df_po_master['Part No.'].fillna('').astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(4)
+                
+                if 'Quantity' in df_po_master.columns:
+                    df_po_master['Quantity'] = pd.to_numeric(df_po_master['Quantity'], errors='coerce').fillna(0)
+
+                # 4. Summarize df_duplicates (Aggregation)
+                # Group by Account and Part No to merge multiple lines into one
+                df_dup_agg = df_duplicates.groupby(['ACCOUNT NO.', 'Part No.'], as_index=False).agg({
+                    'Quantity': 'sum',
+                    'EQUIP': 'first'  # Take the first equipment description found
+                })
+
+                # 5. Merge with PO Master
+                # Left join to find matching POs for the aggregated duplicates
+                df_merged_po = pd.merge(
+                    df_dup_agg,
+                    df_po_master[['ACCOUNT NO.', 'Part No.', 'PO Number', 'Quantity']],
+                    on=['ACCOUNT NO.', 'Part No.'],
+                    how='left',
+                    suffixes=('', '_Master')
+                )
+
+                # 6. Error Calculation
+                # Check if Aggregated Quantity matches Master Quantity
+                df_merged_po['Quantity_Master'] = df_merged_po['Quantity_Master'].fillna(0)
+                df_merged_po['Error'] = df_merged_po['Quantity'] != df_merged_po['Quantity_Master']
+
+                # 7. Filter Outputs
+                # File 1: Success (No Error) -> Columns: PO, Account, Equipment, Quantity, Part number
+                df_po_success = df_merged_po[df_merged_po['Error'] == False].copy()
+                df_po_success = df_po_success[['PO Number', 'ACCOUNT NO.', 'EQUIP', 'Quantity', 'Part No.']]
+                df_po_success.rename(columns={'PO Number': 'PO', 'ACCOUNT NO.': 'Account', 'EQUIP': 'Equipment', 'Part No.': 'Part number'}, inplace=True)
+
+                # File 2: Errors -> All columns
+                df_po_errors = df_merged_po[df_merged_po['Error'] == True].copy()
+        except Exception as e:
+            print(f"Warning: PO Reconciliation failed. {e}")
+
+    # =========================================================
     # PART 2: Process Tab 3 (Index 2) - STD Import Logic
     # =========================================================
     try:
@@ -132,10 +196,6 @@ def run_reconciliation(source_path, master_path, po_master_path, export_folder):
         else:
             raise ValueError(f"Column 'ACCOUNT NO.' not found in 3rd Tab.")
 
-    # =========================================================
-    # TODO: INSERT YOUR NEW FILE LOGIC HERE
-    # =========================================================
-    # df_new_logic = ...
 
     # =========================================================
     # EXPORT
@@ -160,5 +220,19 @@ def run_reconciliation(source_path, master_path, po_master_path, export_folder):
         msg += f"\n\nFile 2 Created:\n{file_name_2}"
     else:
         msg += "\n\n(Warning: 3rd Tab empty or skipped, File 2 not created.)"
+
+    # File 3: PO Recon Success
+    if not df_po_success.empty:
+        file_name_3 = f"PO_Recon_Success_{timestamp}.xlsx"
+        full_path_3 = os.path.join(export_folder, file_name_3)
+        df_po_success.to_excel(full_path_3, index=False)
+        msg += f"\n\nFile 3 Created (PO Success):\n{file_name_3}"
+
+    # File 4: PO Recon Errors
+    if not df_po_errors.empty:
+        file_name_4 = f"PO_Recon_Errors_{timestamp}.xlsx"
+        full_path_4 = os.path.join(export_folder, file_name_4)
+        df_po_errors.to_excel(full_path_4, index=False)
+        msg += f"\n\nFile 4 Created (PO Errors):\n{file_name_4}"
 
     return msg
