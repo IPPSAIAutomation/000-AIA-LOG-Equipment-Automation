@@ -2,7 +2,7 @@ import pandas as pd
 import os
 from datetime import datetime
 
-def run_reconciliation(source_path, master_path, export_folder):
+def run_reconciliation(source_path, master_path, po_master_path, export_folder):
     """
     Core logic for Equipment Reconciliation.
     Returns a success message string if successful.

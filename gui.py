@@ -16,6 +16,7 @@ class EquipmentReconApp:
         # Variables
         self.source_path = tk.StringVar()
         self.master_path = tk.StringVar()
+        self.po_master_path = tk.StringVar()
         self.export_folder = tk.StringVar()
 
         # --- GUI LAYOUT ---
@@ -35,12 +36,17 @@ class EquipmentReconApp:
         ttk.Entry(form_frame, textvariable=self.master_path, width=50).grid(row=3, column=0, padx=5, pady=5)
         ttk.Button(form_frame, text="Browse", command=self.select_master).grid(row=3, column=1, padx=5)
 
-        # 3. Export Folder
-        ttk.Label(form_frame, text="Export Folder:").grid(row=4, column=0, sticky='w', pady=(10, 0))
-        ttk.Entry(form_frame, textvariable=self.export_folder, width=50).grid(row=5, column=0, padx=5, pady=5)
-        ttk.Button(form_frame, text="Browse", command=self.select_folder).grid(row=5, column=1, padx=5)
+        # 3. Equipment PO Part Account Master File
+        ttk.Label(form_frame, text="Equipment PO Part Account Master File:").grid(row=4, column=0, sticky='w', pady=(10, 0))
+        ttk.Entry(form_frame, textvariable=self.po_master_path, width=50).grid(row=5, column=0, padx=5, pady=5)
+        ttk.Button(form_frame, text="Browse", command=self.select_po_master).grid(row=5, column=1, padx=5)
 
-        # 4. Action Button
+        # 4. Export Folder
+        ttk.Label(form_frame, text="Export Folder:").grid(row=6, column=0, sticky='w', pady=(10, 0))
+        ttk.Entry(form_frame, textvariable=self.export_folder, width=50).grid(row=7, column=0, padx=5, pady=5)
+        ttk.Button(form_frame, text="Browse", command=self.select_folder).grid(row=7, column=1, padx=5)
+
+        # 5. Action Button
         btn_frame = ttk.Frame(root, padding=20)
         btn_frame.pack(fill='x')
         self.run_btn = tk.Button(btn_frame, text="RUN RECONCILIATION", bg="#4CAF50", fg="white", 
@@ -62,14 +68,18 @@ class EquipmentReconApp:
         filename = filedialog.askopenfilename(title="Select Master File", filetypes=[("Excel Files", "*.xlsx *.xls")])
         if filename: self.master_path.set(filename)
 
+    def select_po_master(self):
+        filename = filedialog.askopenfilename(title="Select PO Master File", filetypes=[("Excel Files", "*.xlsx *.xls")])
+        if filename: self.po_master_path.set(filename)
+
     def select_folder(self):
         folder = filedialog.askdirectory(title="Select Export Folder")
         if folder: self.export_folder.set(folder)
 
     def run_process(self):
         # 1. Validation
-        if not all([self.source_path.get(), self.master_path.get(), self.export_folder.get()]):
-            messagebox.showerror("Error", "Please select both input files and an export folder.")
+        if not all([self.source_path.get(), self.master_path.get(), self.po_master_path.get(), self.export_folder.get()]):
+            messagebox.showerror("Error", "Please select all input files and an export folder.")
             return
 
         # 2. Execution
@@ -81,6 +91,7 @@ class EquipmentReconApp:
             success_msg = logic.run_reconciliation(
                 self.source_path.get(),
                 self.master_path.get(),
+                self.po_master_path.get(),
                 self.export_folder.get()
             )
 
