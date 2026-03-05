@@ -5,6 +5,7 @@ import threading
 import queue
 import os
 import datetime
+import webbrowser
 from typing import Tuple, Optional, List
 
 # --------------------------------------------------------------------------------
@@ -33,6 +34,10 @@ class DataProcessor:
     def error(self, message: str):
         """Helper to send error messages to the GUI thread."""
         self.log_queue.put(("error", message))
+
+    def progress(self, value: int):
+        """Helper to send progress updates to the GUI thread."""
+        self.log_queue.put(("progress", value))
 
     def load_excel_with_stop_condition(self, file_path: str, sheet_index: int, 
                                      col_stop_trigger: str = "ACCOUNT NO.") -> pd.DataFrame:
@@ -113,6 +118,14 @@ class DataProcessor:
     def run(self):
         """Main execution flow for business logic."""
         try:
+            target_acc = "35996677"
+            def trace_acc(step_name, df_trace):
+                if 'ACCOUNT NO.' in df_trace.columns:
+                    # Convert to string to ensure matching regardless of types
+                    matches = df_trace[df_trace['ACCOUNT NO.'].astype(str).str.strip() == target_acc]
+                    self.log(f"TRACE [{step_name}]: Found {len(matches)} rows for {target_acc}")
+
+            self.progress(5)
             self.log("Starting processing...")
 
             # ---------------------------------------------------------
@@ -122,10 +135,12 @@ class DataProcessor:
             df_parts = pd.read_excel(self.files['01']) if self.files['01'].endswith('.xlsx') else pd.read_csv(self.files['01'])
             # Normalize part numbers in master file
             df_parts = self.normalize_part_number(df_parts, "Part No.")
+            self.progress(15)
 
             self.log("Loading PO Account Master...")
             df_po = pd.read_excel(self.files['02']) if self.files['02'].endswith('.xlsx') else pd.read_csv(self.files['02'])
             df_po = self.normalize_part_number(df_po, "Part")
+            self.progress(25)
 
             # ---------------------------------------------------------
             # 2. Initial Data Manipulation (df_start)
@@ -139,9 +154,13 @@ class DataProcessor:
             # Logic: Remove negative rates (Save for Output 5)
             df_neg_rates = df_equip_raw[df_equip_raw['RATE'] < 0].copy()
             df_start = df_equip_raw[df_equip_raw['RATE'] >= 0].copy()
+            trace_acc("1. After Rate Filter", df_start)
 
             # Logic: Remove specific equipment
             df_start = df_start[df_start['EQUIP'] != "H/C  Filtration -Countertop Unit"]
+            df_start = df_start[df_start['EQUIP'] != "H/C Filtration -Countertop Unit"]
+            trace_acc("2. After Equip Filter", df_start)
+            self.progress(35)
 
             # ---------------------------------------------------------
             # 3. Output 1 Logic: Equipment Import
@@ -159,6 +178,8 @@ class DataProcessor:
             is_dup = df_out1_base.duplicated(subset=['ACCOUNT NO.'], keep=False)
             df_01_unique = df_out1_base[~is_dup].copy()
             df_02_duplicate = df_out1_base[is_dup].copy()
+            trace_acc("3. Assigned to Unique DF", df_01_unique)
+            trace_acc("3. Assigned to Duplicate DF", df_02_duplicate)
 
             # Merge Part Numbers
             # Left merge using EQUIP (Main) and Equipment (Master)
@@ -183,8 +204,12 @@ class DataProcessor:
             
             # Remove them from duplicate df
             df_02_duplicate = df_02_duplicate[~df_02_duplicate['ACCOUNT NO.'].isin(single_entry_accounts)]
+            trace_acc("4. Final Unique DF", df_01_unique)
+            trace_acc("4. Final Duplicate DF", df_02_duplicate)
 
             self.save_excel(df_01_unique, "UCSD EQUIPMENT Equipment Import")
+            self.save_excel(df_02_duplicate, "UCSD EQUIPMENT Raw Duplicates CHECK")
+            self.progress(55)
 
             # ---------------------------------------------------------
             # 4. Output 2 Logic: STD Import
@@ -210,6 +235,7 @@ class DataProcessor:
             # Reorder columns
             df_out2 = df_out2[['ACCOUNT NO.', 'EQUIP', 'QTY', 'Part No.']]
             self.save_excel(df_out2, "UCSD EQUIPMENT STD Import")
+            self.progress(70)
 
             # ---------------------------------------------------------
             # 5. Output 3 & 4 Logic: Duplicate Processing
@@ -274,6 +300,7 @@ class DataProcessor:
             df_fail = merged_dups[merged_dups['Status'] == 'Mismatch'].copy()
             # "Keep all columns" logic
             self.save_excel(df_fail, "UCSD EQUIPMENT Duplicate ERRORS")
+            self.progress(90)
 
             # ---------------------------------------------------------
             # 6. Output 5: Credits (Negative Rates)
@@ -281,6 +308,7 @@ class DataProcessor:
             self.log("Processing Output 5 (Credits)...")
             self.save_excel(df_neg_rates, "UCSD EQUIPMENT Credits")
 
+            self.progress(100)
             self.log("Processing Complete!")
             self.log_queue.put(("done", "All files generated successfully."))
 
@@ -326,7 +354,7 @@ class ModernApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Equipment Data Automator")
-        self.geometry("700x550")
+        self.geometry("750x650")
         self.resizable(False, False)
         
         # Set theme/style
@@ -337,6 +365,7 @@ class ModernApp(tk.Tk):
         self.bg_color = "#f4f4f4"
         self.accent_color = "#2196F3" # Blue
         self.success_color = "#4CAF50" # Green
+        self.error_color = "#F44336" # Red
         self.configure(bg=self.bg_color)
 
         # State storage
@@ -387,6 +416,17 @@ class ModernApp(tk.Tk):
         self.log_text = tk.Text(log_frame, height=8, state='disabled', font=("Consolas", 9), 
                                bg="#e8e8e8", relief=tk.FLAT)
         self.log_text.pack(fill=tk.BOTH, expand=True)
+
+        # Configure Log Tags
+        self.log_text.tag_configure("info", foreground="blue")
+        self.log_text.tag_configure("success", foreground="green")
+        self.log_text.tag_configure("error", foreground="red")
+        self.log_text.tag_configure("status", foreground="blue") 
+
+        # Progress Bar
+        self.progress_bar = ttk.Progressbar(main_frame, orient=tk.HORIZONTAL, 
+                                          mode='determinate', length=100)
+        self.progress_bar.pack(fill=tk.X, pady=(0, 10))
 
         # Action Button
         self.run_btn = tk.Button(main_frame, text="Run Process", command=self.start_processing,
@@ -464,16 +504,24 @@ class ModernApp(tk.Tk):
     def check_ready(self):
         """Enables Run button only if all inputs are satisfied."""
         if all(self.file_paths.values()) and self.output_path:
-            self.run_btn.config(state=tk.NORMAL, bg=self.accent_color, fg="white", cursor="hand2")
+            self.run_btn.config(state=tk.NORMAL, text="Run Process", command=self.start_processing,
+                              bg=self.accent_color, fg="white", cursor="hand2")
         else:
             self.run_btn.config(state=tk.DISABLED, bg="#ddd", fg="#888")
 
-    def append_log(self, msg):
-        """Updates log window safely."""
+    def append_log(self, msg, level="info"):
+        """Updates log window safely with color tagging."""
         self.log_text.config(state='normal')
-        self.log_text.insert(tk.END, f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}\n")
+        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+        self.log_text.insert(tk.END, f"[{timestamp}] ", "status")
+        self.log_text.insert(tk.END, f"{msg}\n", level)
         self.log_text.see(tk.END)
         self.log_text.config(state='disabled')
+
+    def open_results(self):
+        """Opens the output folder in explorer."""
+        if self.output_path:
+            webbrowser.open(self.output_path)
 
     def start_processing(self):
         """Initiates the background thread."""
@@ -495,16 +543,20 @@ class ModernApp(tk.Tk):
                 msg_type, msg_content = self.msg_queue.get_nowait()
                 
                 if msg_type == "status":
-                    self.append_log(msg_content)
+                    self.append_log(msg_content, level="status")
+                elif msg_type == "progress":
+                    self.progress_bar['value'] = msg_content
                 elif msg_type == "error":
-                    self.append_log(f"ERROR: {msg_content}")
+                    self.append_log(f"ERROR: {msg_content}", level="error")
                     messagebox.showerror("Error", msg_content)
                     self.reset_ui()
                     return # Stop polling on critical error
                 elif msg_type == "done":
-                    self.append_log(msg_content)
+                    self.append_log(msg_content, level="success")
+                    self.run_btn.config(text="Open Results Folder", command=self.open_results, 
+                                      state=tk.NORMAL, bg=self.success_color)
+                    self.update_idletasks() # Ensure button changes before modal dialog
                     messagebox.showinfo("Success", msg_content)
-                    self.reset_ui()
                     return
 
         except queue.Empty:
@@ -512,7 +564,8 @@ class ModernApp(tk.Tk):
             self.after(100, self.poll_queue)
 
     def reset_ui(self):
-        self.run_btn.config(state=tk.NORMAL, text="Run Process", bg=self.accent_color)
+        self.progress_bar['value'] = 0
+        self.run_btn.config(state=tk.NORMAL, text="Run Process", command=self.start_processing, bg=self.accent_color)
 
 # --------------------------------------------------------------------------------
 # Main Entry Point
