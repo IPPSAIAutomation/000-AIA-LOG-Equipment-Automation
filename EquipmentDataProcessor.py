@@ -249,56 +249,65 @@ class DataProcessor:
             # Summarize by Account and Part, Sum QTY
             df_dup_sum = df_dup_proc.groupby(['ACCOUNT NO.', 'Part No.'], as_index=False)['QTY'].sum()
 
-            # Merge with [02 Master File PO Account]
-            # Merge Keys: Account = Account No., Part = Part No.
-            # PO File columns: PO, Account, Equipment, Quantity, Part
-            
-            # Prepare PO DF for merge (renaming for easier merge)
-            df_po_merge = df_po[['PO', 'Account', 'Quantity', 'Part', 'Equipment']].copy()
-            df_po_merge.rename(columns={
-                'Quantity': 'Quantity_02_File',
-                'Account': 'Account_Ref',
-                'Part': 'Part_Ref',
-                'Equipment': 'Equipment_Ref' # Renaming to avoid collision
-            }, inplace=True)
+            # --- Transactional Allocation Logic ---
+            # Create a working ledger copy of the PO master so we can "consume"
+            # each PO's quantity as it is allocated to a demand row.
+            df_po_ledger = df_po[['PO', 'Account', 'Equipment', 'Quantity', 'Part']].copy()
+            df_po_ledger['Quantity'] = pd.to_numeric(df_po_ledger['Quantity'], errors='coerce').fillna(0)
 
-            merged_dups = pd.merge(
-                df_dup_sum,
-                df_po_merge,
-                left_on=['ACCOUNT NO.', 'Part No.'],
-                right_on=['Account_Ref', 'Part_Ref'],
-                how='left'
-            )
+            pass_records = []
+            fail_records = []
 
-            # Clean QTY for comparison
-            merged_dups['Quantity_02_File'] = pd.to_numeric(merged_dups['Quantity_02_File'], errors='coerce').fillna(0)
-            
-            # Comparison Logic
-            # "Pass" if QTY == Quantity_02_File, else "Mismatch"
-            merged_dups['Status'] = merged_dups.apply(
-                lambda row: 'Pass' if row['QTY'] == row['Quantity_02_File'] else 'Mismatch', axis=1
-            )
+            # Iterate over each aggregated demand row (Account + Part → total QTY needed)
+            for _, demand_row in df_dup_sum.iterrows():
+                needed_qty   = demand_row['QTY']
+                acct         = demand_row['ACCOUNT NO.']
+                part         = demand_row['Part No.']
 
-            # --- Output 3: Pass ---
-            df_pass = merged_dups[merged_dups['Status'] == 'Pass'].copy()
-            # Cols: PO, Account, Equipment, Quantity, Part
-            # Mapping back: Account -> ACCOUNT NO., Quantity -> QTY, Part -> Part No.
-            # But prompt says "Keep only columns PO, Account, Equipment, Quantity, Part"
-            # It implies taking the data structure roughly from the PO file side or the combined side.
-            # I will construct the final DF based on the available data.
-            
-            df_out3 = pd.DataFrame()
-            df_out3['PO'] = df_pass['PO']
-            df_out3['Account'] = df_pass['ACCOUNT NO.']
-            df_out3['Equipment'] = df_pass['Equipment_Ref'] # Using reference equipment name
-            df_out3['Quantity'] = df_pass['QTY']
-            df_out3['Part'] = df_pass['Part No.']
-            
+                # Find all PO ledger rows that match this account+part and still have stock
+                matching_mask = (
+                    (df_po_ledger['Account'].astype(str).str.strip() == str(acct).strip()) &
+                    (df_po_ledger['Part'].astype(str).str.strip()    == str(part).strip()) &
+                    (df_po_ledger['Quantity'] > 0)
+                )
+                matching_idx = df_po_ledger.index[matching_mask].tolist()
+
+                # Allocate quantity across matching POs until demand is fulfilled
+                for idx in matching_idx:
+                    if needed_qty <= 0:
+                        break
+
+                    available_qty  = df_po_ledger.at[idx, 'Quantity']
+                    allocated_qty  = min(needed_qty, available_qty)
+
+                    # Consume from demand and ledger
+                    needed_qty                      -= allocated_qty
+                    df_po_ledger.at[idx, 'Quantity'] -= allocated_qty
+
+                    pass_records.append({
+                        'PO'       : df_po_ledger.at[idx, 'PO'],
+                        'Account'  : acct,
+                        'Equipment': df_po_ledger.at[idx, 'Equipment'],
+                        'Quantity' : allocated_qty,
+                        'Part'     : part,
+                    })
+
+                # Any remaining unfulfilled quantity becomes a failed record
+                if needed_qty > 0:
+                    fail_records.append({
+                        'PO'       : 'Unfulfilled',
+                        'Account'  : acct,
+                        'Equipment': '',
+                        'Quantity' : needed_qty,
+                        'Part'     : part,
+                    })
+
+            # --- Output 3: Successfully allocated records ---
+            df_out3 = pd.DataFrame(pass_records, columns=['PO', 'Account', 'Equipment', 'Quantity', 'Part'])
             self.save_excel(df_out3, "UCSD EQUIPMENT Duplicate Import")
 
-            # --- Output 4: Mismatch ---
-            df_fail = merged_dups[merged_dups['Status'] == 'Mismatch'].copy()
-            # "Keep all columns" logic
+            # --- Output 4: Unfulfilled / error records ---
+            df_fail = pd.DataFrame(fail_records, columns=['PO', 'Account', 'Equipment', 'Quantity', 'Part'])
             self.save_excel(df_fail, "UCSD EQUIPMENT Duplicate ERRORS")
             self.progress(90)
 
